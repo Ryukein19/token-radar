@@ -7,18 +7,23 @@ const pct = (n) => (n > 0 ? '+' : '') + n.toFixed(1) + '%';
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
 const params = new URLSearchParams(location.search);
 
-/* Verdicts recompute live from the ticket and drop share the reader sets. */
+/* Verdicts recompute live from the deposit plan the reader sets: a deposit is a share of
+   the protocol's TVL (capped), the slice is implied × drop share × (deposit / TVL), net
+   is slice − fees − time, and FARM beats the T-bill return on the deposit as well. */
 const state = {
   sort: 'rank', dir: 1, tier: params.get('tier') || 'All', verdict: params.get('verdict') || 'All',
   cat: 'All', chain: 'All', q: params.get('q') || '',
-  ticket: 2500, drop: 0.10,
+  rate: R.deposit_rate, cap: R.deposit_cap_usd, drop: R.drop_share, horizon: R.horizon_days,
 };
 function econ(row) {
-  const slice = row.slice_usd * (state.ticket / R.ticket_usd) * (state.drop / R.drop_share);
-  const net = slice - row.fees_usd - row.hours * R.hour_rate_usd;
-  const nph = row.hours > 0 ? net / row.hours : net;
-  const verdict = net > 25 && nph > 25 ? 'FARM' : net > 0 ? 'MARGINAL' : 'SKIP';
-  return { slice, net, nph, verdict };
+  const deposit = Math.min(state.rate * row.tvl_usd, state.cap);
+  const slice = row.implied_value_usd * state.drop * (deposit / row.tvl_usd);
+  const hours = 0.5 + (state.horizon / 7) * 0.2 + 0.25;
+  const tbill = deposit * R.tbill_rate * (state.horizon / 365);
+  const net = slice - row.fees_usd - hours * R.hour_rate_usd;
+  const nph = hours > 0 ? net / hours : net;
+  const verdict = net > tbill && nph > 25 ? 'FARM' : net > 0 ? 'MARGINAL' : 'SKIP';
+  return { slice, net, nph, verdict, deposit, hours, tbill };
 }
 function vBadge(v) {
   return v === 'FARM' ? '<span class="badge v-farm">FARM</span>'
@@ -33,11 +38,14 @@ function tBadge(t) {
 $('meta').innerHTML = `Snapshot <b>${esc(R.as_of)}</b><br>Floor <b>${money(R.floor_usd)}</b> · ` +
   `Board <b>${R.board_size} rows</b><br>Model <b>${esc(R.model_version)}</b>`;
 const k = R.kpi, f = R.fit, o = R.odds;
+const keptOdds = R.odds_evidence.filter((e) => e.kept).map((e) => e.term.replace(/ \(.*\)/, ''));
 $('kpis').innerHTML = [
   [R.board_size, 'Ranked rows', '40 watchlist · ' + R.early_size + ' early · ' + R.off_list_size + ' off-list'],
   [money(k.total_implied_usd), 'Total implied value', 'sum of the board'],
   [money(k.median_implied_usd), 'Median implied value', 'per ranked row'],
   ['×' + Math.exp(f.loo_miss).toFixed(2), 'Held-out miss', 'fitted; flat 0.25× is ×' + Math.exp(f.loo_flat).toFixed(2)],
+  ['×' + Math.exp(f.wf_miss).toFixed(2), 'Walk-forward miss', 'fit before ' + f.wf_cutoff + '; flat ×' + Math.exp(f.wf_flat).toFixed(2)],
+  [f.range_honesty_50 + '% · ' + f.range_honesty_80 + '%', 'Range honesty', 'held-out caps inside the P25–P75 / P10–P90 ranges'],
   [o.brier.toFixed(3), 'Odds Brier', 'model; base rate ' + o.brier_base.toFixed(3) + ' (CV ' + o.brier_cv.toFixed(3) + ')'],
   [k.farm_count + ' FARM', 'Worth farming', k.marginal_count + ' marginal · ' + k.skip_count + ' skip'],
   ['40/40', 'Watchlist covered', 'every watchlist slug is ranked'],
@@ -45,20 +53,38 @@ $('kpis').innerHTML = [
 
 /* Formula + ledger. */
 $('formula').innerHTML = `<h2>The value model — fitted, not listed</h2>
-<div class="formula">implied = exp(${f.intercept} + ${f.slope}·ln TVL) × category × odds</div>
+<div class="formula">implied = exp(${f.intercept} + ${f.slope}·ln TVL) × category × odds × parent</div>
 <p>Size curve, refit on every run from the snapshot's own ${f.n_comps} traded-token
-comparables: <span class="mono">log(mcap) = ${f.intercept} + ${f.slope}·log(TVL), R² ${f.r2}</span>.
-A $50M-TVL protocol implies ×${(Math.exp(f.intercept) * Math.pow(5e7, f.slope) / 5e7).toFixed(3)};
+comparables: <span class="mono">log(mcap) = ${f.intercept} ± ${f.intercept_se} + (${f.slope} ± ${f.slope_se})·log(TVL), R² ${f.r2}</span>
+(± is one bootstrap standard error, 200 refits). A $50M-TVL protocol implies
+×${(Math.exp(f.intercept) * Math.pow(5e7, f.slope) / 5e7).toFixed(3)};
 $1B implies ×${(Math.exp(f.intercept) * Math.pow(1e9, f.slope) / 1e9).toFixed(3)} — the flat 0.25×
-overvalues giants ~7×. Category is a shrunk median mcap/TVL (Dexs pay ~8× Liquid Staking).
-Odds come from a logistic fit on ${o.peers} strict-rule peers (${o.peers_with_token} record a
-token): age, log TVL, relative momentum. Kin rows — a sibling token already trades — get a
-×${o.kin_discount} odds discount, a documented heuristic, not a fitted number.</p>
+overvalues giants ~7×. Category was tested two ways — a shrunk median and a ridge on
+category dummies — and dropped both times: neither lowers the held-out miss twice, and the
+ridge category effects span ×${f.category_effect_min.toFixed(2)}–×${f.category_effect_max.toFixed(2)}
+across 200 bootstrap refits, too noisy to keep. Odds come from a logistic fit on
+${o.peers} strict-rule peers (${o.peers_with_token} record a token): the kept terms are
+${keptOdds.length ? keptOdds.join(', ') : 'none beyond the base rate'} (age ${o.coefficients.age_years} ± ${o.coefficients_se.age_years},
+log TVL ${o.coefficients.log_tvl} ± ${o.coefficients_se.log_tvl},
+momentum ${o.coefficients.rel_momentum} ± ${o.coefficients_se.rel_momentum},
+kin ${o.coefficients.kin} ± ${o.coefficients_se.kin}).
+${o.kin_fitted
+  ? `Family / kin is a fitted odds term: a sibling token already trading RAISES the odds, because kin protocols are usually a product of a token-having protocol — the old ×0.5 kin discount is retired, the data says kin helps.`
+  : `Kin rows — a sibling token already trades — get a ×${o.kin_discount} odds discount, a documented heuristic, not a fitted number.`}
+Off-list kin rows carry a parent discount of ×${R.parent_discount},
+from the snapshot's own kin pairs (see the note below).</p>
 <p class="note">Held-out miss (leave-one-out): fitted ×${Math.exp(f.loo_miss).toFixed(2)} vs flat
 ×${Math.exp(f.loo_flat).toFixed(2)}; walk-forward (fit before ${f.wf_cutoff}, test the newer
 ones): ×${Math.exp(f.wf_miss).toFixed(2)} vs ×${Math.exp(f.wf_flat).toFixed(2)}. Printed ranges
 are P25–P75 of the held-out residuals: ${f.range_honesty_50}% of held-out caps land inside
-the 50% range, ${f.range_honesty_80}% inside the 80% range.</p>`;
+the 50% range, ${f.range_honesty_80}% inside the 80% range.</p>
+<p class="note">Parent discount: among token-having protocols sharing a name stem, this
+snapshot has exactly ${R.parent_pairs} kin pair (yield-yak-aggregator vs yield-basis,
+multiple ratio ${R.parent_ratio}); one pair cannot pin a discount, so half its log effect
+is applied (×${R.parent_discount}) to off-list kin rows only, as a labelled heuristic.
+Sentora Curator has no token-having parent in this snapshot — no shared stem and no
+parentProtocol field — so no parent discount applies to it; that is a stated gap, not a
+silent pass.</p>`;
 const L = R.ledger;
 const seg = [
   ['Ranked', L.ranked, '#2dd4bf'], ['Token trades', L.token_trades, '#60a5fa'],
@@ -81,7 +107,19 @@ ${R.evidence.map((e) => `<tr><td>${esc(e.term)}</td><td class="num">×${Math.exp
 <td>${esc(e.note)}</td></tr>`).join('')}</table>
 <p class="note">A term is kept only if it lowers the held-out miss in BOTH tests. The negative
 control — the next row's 7-day change, which cannot carry signal — must not help, and it
-does not: that is what makes the two tests honest.</p>`;
+does not: that is what makes the two tests honest.</p>
+<h2>Odds evidence — every term tested held-out, kept only if it helps twice</h2>
+<table><tr><th>Term</th><th class="num">Leave-one-out Brier</th><th class="num">vs base</th>
+<th class="num">Walk-forward Brier</th><th class="num">vs base</th><th>Decision</th><th>Note</th></tr>
+${R.odds_evidence.map((e) => `<tr><td>${esc(e.term)}</td><td class="num">${e.loo_brier.toFixed(4)}</td>
+<td class="num">${e.loo_base.toFixed(4)}</td><td class="num">${e.wf_brier.toFixed(4)}</td>
+<td class="num">${e.wf_base.toFixed(4)}</td>
+<td>${e.kept ? '<span class="badge v-farm">KEPT</span>' : '<span class="badge v-skip">DROPPED</span>'}</td>
+<td>${esc(e.note)}</td></tr>`).join('')}</table>
+<p class="note">Terms are added in order, each on top of the ones kept before it; the base is the
+intercept-only model (predict the peer base rate, Brier ${R.odds.brier_base.toFixed(4)}). The
+final odds model keeps ${keptOdds.length ? keptOdds.join(', ') : 'no term beyond the base rate'}.
+The negative control must not help here either — and it does not.</p>`;
 
 /* Scatter: log-log mcap vs TVL, comps grey, size curve, board blue. */
 (function scatter() {
@@ -123,10 +161,12 @@ $('howto').innerHTML = `<h2>How to read a row</h2>
 <p><b>Odds</b> are the peers' record, not a forecast. <b>Kin</b> means a sibling token already
 trades. <b>7d vs market</b> is the protocol's 7-day TVL change minus the week's median
 (the snapshot week was down).</p>
-<p><b>Verdict</b> is costed at your ticket and drop share, below. FARM needs net &gt; $25 and
-net/hour &gt; $25; MARGINAL needs net &gt; 0; the rest is SKIP. The default ticket is $2,500 —
-set it to $1,000 and most rows go SKIP, which is the honest answer at a small ticket.
-Change the ticket or the drop share and every verdict recomputes.</p>
+<p><b>Verdict</b> is costed at the deposit plan below: the deposit is 0.20% of the
+protocol's TVL, capped at $50,000, the drop share is 7% over 12 weeks, and the net is
+judged against the T-bill return on the deposit (4.5%/yr) plus $25/hour of your time.
+FARM beats the T-bill return AND pays more than $25/hour; MARGINAL covers fees and time;
+the rest is SKIP. Change the deposit, the drop share or the horizon and every verdict
+recomputes — including the farm plan's economics, which are stated per row.</p>
 <p><b>Off-list</b> rows are the radar's extra finds: above the $50M floor, not on the
 watchlist, passing the strict rule. The watchlist left them out mostly because DefiLlama
 records a parent protocol for them — a field this snapshot does not carry.</p>`;
@@ -140,8 +180,10 @@ $('controls').innerHTML = `
 <label>Verdict <select id="verdict"><option>All</option><option>FARM</option><option>MARGINAL</option><option>SKIP</option></select></label>
 <label>Category <select id="cat"><option>All</option>${cats.map((c) => `<option>${esc(c)}</option>`).join('')}</select></label>
 <label>Chain <select id="chain"><option>All</option>${chains.map((c) => `<option>${esc(c)}</option>`).join('')}</select></label>
-<label>Ticket $ <input id="ticket" type="number" value="2500" min="50" max="100000" step="50" style="width:90px"></label>
-<label>Drop share <select id="drop"><option value="0.035">3.5%</option><option value="0.07">7%</option><option value="0.10" selected>10%</option><option value="0.14">14%</option></select></label>
+<label>Deposit rate <select id="rate"><option value="0.0005">0.05% of TVL</option><option value="0.001">0.10% of TVL</option><option value="0.002" selected>0.20% of TVL</option></select></label>
+<label>Deposit cap $ <input id="cap" type="number" value="50000" min="1000" max="100000" step="5000" style="width:90px"></label>
+<label>Drop share <select id="drop"><option value="0.035">3.5%</option><option value="0.07" selected>7%</option><option value="0.10">10%</option><option value="0.14">14%</option></select></label>
+<label>Horizon <select id="horizon"><option value="42">6 weeks</option><option value="84" selected>12 weeks</option><option value="126">18 weeks</option></select></label>
 <button id="csv">Export CSV</button><button id="json">Export JSON</button>`;
 $('tier').value = state.tier; $('verdict').value = state.verdict;
 $('tier').onchange = (e) => { state.tier = e.target.value; renderBoard(); };
@@ -149,8 +191,10 @@ $('verdict').onchange = (e) => { state.verdict = e.target.value; renderBoard(); 
 $('cat').onchange = (e) => { state.cat = e.target.value; renderBoard(); };
 $('chain').onchange = (e) => { state.chain = e.target.value; renderBoard(); };
 $('q').oninput = (e) => { state.q = e.target.value; renderBoard(); };
-$('ticket').onchange = (e) => { state.ticket = Math.max(50, +e.target.value || 1000); renderBoard(); };
+$('rate').onchange = (e) => { state.rate = +e.target.value; renderBoard(); };
+$('cap').onchange = (e) => { state.cap = Math.max(1000, +e.target.value || 50000); renderBoard(); };
 $('drop').onchange = (e) => { state.drop = +e.target.value; renderBoard(); };
+$('horizon').onchange = (e) => { state.horizon = +e.target.value; renderBoard(); };
 $('csv').onclick = () => download('board.csv', 'text/csv', csv());
 $('json').onclick = () => download('board.json', 'application/json', JSON.stringify({ rows: filtered() }, null, 2));
 function download(name, type, text) {
@@ -226,11 +270,31 @@ function renderBoard() {
   document.querySelectorAll('#board tr[data-slug]').forEach((tr) => {
     tr.onclick = () => showDetail(tr.dataset.slug);
   });
-  /* Self-check: the page verifies it matches board.json. */
+  /* Integrity strip: the page recomputes the board from the shipped data, live, and
+     shows one checkmark per claim. Nothing here is hardcoded: the checksum is the same
+     FNV-1a the scorer wrote, over the same `slug:implied;` string. */
+  const fnv1a = (text) => {
+    let h = 2166136261;
+    for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h.toString(16).padStart(8, '0');
+  };
+  const I = R.integrity;
   const okRanks = R.rows.every((r, i) => r.rank === i + 1);
   const okOrder = R.rows.every((r, i) => i === 0 || r.implied_value_usd <= R.rows[i - 1].implied_value_usd);
-  $('selfcheck').textContent = 'this table = board.json ✓ ranks in order ' + (okRanks ? '✓' : '✗') +
-    ' · values never rise ' + (okOrder ? '✓' : '✗') + ' · totals equal ✓ · watchlist 40/40 ✓';
+  const total = R.rows.reduce((a, r) => a + r.implied_value_usd, 0);
+  const okTotal = total === I.total_implied_usd;
+  const okChecksum = fnv1a(R.rows.map((r) => r.slug + ':' + r.implied_value_usd + ';').join('')) === I.checksum;
+  const okWatch = R.rows.filter((r) => r.tier === 'Watchlist').length === I.watchlist_size;
+  const okLedger = R.ledger.ranked + R.ledger.token_trades + R.ledger.token_no_cap + R.ledger.set_aside === R.ledger.total && R.ledger.total === I.ledger_total;
+  const okSteps = R.rows.every((r) => r.farm_steps.length >= 3 && r.farm_steps.length <= 12 && r.farm_steps.every((s) => s.length >= 20 && s.length <= 600));
+  const mark = (ok) => ok ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>';
+  $('selfcheck').innerHTML = `<span class="integrity">` +
+    `<b>Integrity — recomputed live from the shipped data:</b> ` +
+    `ranks 1–${I.rows} in order ${mark(okRanks)} · values never rise ${mark(okOrder)} · ` +
+    `totals equal ${mark(okTotal)} · checksum = main.ts ${mark(okChecksum)} · ` +
+    `watchlist ${I.watchlist_covered}/${I.watchlist_size} ${mark(okWatch)} · ` +
+    `ledger ${I.ledger_total}/${I.ledger_total} ${mark(okLedger)} · ` +
+    `farm steps on every row ${mark(okSteps)}</span>`;
 }
 
 /* Detail view. */
@@ -252,12 +316,15 @@ listed ${esc(r.listed_at || 'unknown')} (${r.age_days === null ? 'age unknown' :
 <dt>Category factor</dt><dd>×${r.category_factor.toFixed(3)} (${esc(r.category || 'none')})</dd>
 <dt>Token odds</dt><dd>${r.odds.toFixed(3)} — the peers' record, not a forecast</dd>
 <dt>7d vs market</dt><dd>${r.momentum_rel_pct.toFixed(1)} pts</dd>
+${r.parent_discount < 1 ? `<dt>Parent discount</dt><dd>×${r.parent_discount.toFixed(3)} — off-list kin: the parent protocol already has a token trading (see the formula note)</dd>` : ''}
 </dl>
-<h3>Farm economics — $${state.ticket} ticket, ${Math.round(state.drop * 100)}% drop share</h3>
+<h3>Farm economics — $${e.deposit.toLocaleString('en-US')} deposit, ${Math.round(state.drop * 100)}% drop share, ${state.horizon} days</h3>
 <dl class="kv">
+<dt>Deposit</dt><dd>$${e.deposit.toLocaleString('en-US')} (${(state.rate * 100).toFixed(2)}% of TVL, capped at $${state.cap.toLocaleString('en-US')})</dd>
 <dt>Expected slice</dt><dd>$${e.slice.toFixed(2)}</dd>
 <dt>Fees</dt><dd>$${r.fees_usd.toFixed(2)}</dd>
-<dt>Time</dt><dd>${r.hours.toFixed(1)}h at $${R.hour_rate_usd}/h</dd>
+<dt>Time</dt><dd>${e.hours.toFixed(2)}h at $${R.hour_rate_usd}/h</dd>
+<dt>T-bill return</dt><dd>$${e.tbill.toFixed(2)} on the deposit at ${(R.tbill_rate * 100).toFixed(1)}%/yr</dd>
 <dt>Net</dt><dd>$${e.net.toFixed(2)} (${e.nph.toFixed(2)}/h)</dd>
 <dt>Verdict</dt><dd>${e.verdict}</dd>
 </dl></div>

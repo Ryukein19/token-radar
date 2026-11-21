@@ -16,7 +16,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardChecksum, boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -52,9 +52,11 @@ if (issue !== null) {
 
 /**
  * Economics self-check: the dashboard recomputes every verdict live from the row's
- * stored slice, fees and hours, so those three fields must reproduce the model's net
- * to the cent — otherwise the page would show a different net from the farm plan.
- * This is the check that catches a rounding drift between the two (it once hid $0.18).
+ * stored slice, fees, hours and T-bill return, so those fields must reproduce the
+ * model's net and verdict to the cent — otherwise the page would show a different net
+ * from the farm plan. This is the check that catches a rounding drift between the two
+ * (it once hid $0.18). The verdict rule is the model's own: FARM beats the T-bill
+ * return on the deposit AND pays more than $25/hour; MARGINAL covers fees and time.
  */
 for (const row of board) {
   const m = row.model;
@@ -64,11 +66,26 @@ for (const row of board) {
     process.exit(1);
   }
   const nph = m.hours > 0 ? recomputed / m.hours : recomputed;
-  const verdict = recomputed > 25 && nph > 25 ? 'FARM' : recomputed > 0 ? 'MARGINAL' : 'SKIP';
+  const verdict = recomputed > m.tbill_usd && nph > 25 ? 'FARM' : recomputed > 0 ? 'MARGINAL' : 'SKIP';
   if (verdict !== m.verdict) {
     process.stderr.write(`token radar: ${row.slug}: the page would show ${verdict} but the model says ${m.verdict}\n`);
     process.exit(1);
   }
+}
+
+/**
+ * Integrity self-check: the checksum the dashboard recomputes live in the browser must
+ * match the board this run wrote — otherwise the page's integrity strip would show a
+ * mismatch on its first load. A mismatch here means the board changed after the model
+ * built it, which must never happen silently.
+ */
+if (boardChecksum(board) !== radar.integrity.checksum) {
+  process.stderr.write(`token radar: the integrity checksum does not match the board just built\n`);
+  process.exit(1);
+}
+if (radar.integrity.total_implied_usd !== board.reduce((a, r) => a + r.implied_value_usd, 0)) {
+  process.stderr.write(`token radar: the integrity total does not match the board just built\n`);
+  process.exit(1);
 }
 
 mkdirSync(out, { recursive: true });
@@ -109,7 +126,8 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.off_list_size} off-list, ${radar.live_size} live)\n` +
     `token radar: ledger ${radar.ledger.ranked} ranked + ${radar.ledger.token_trades} token-trades + ${radar.ledger.token_no_cap} token-no-cap + ${radar.ledger.set_aside} set aside = ${radar.ledger.total}\n` +
-    `token radar: fit log(mcap) = ${radar.fit.intercept} + ${radar.fit.slope}·log(TVL), R² ${radar.fit.r2}; held-out miss ×${Math.exp(radar.fit.loo_miss).toFixed(2)} vs flat ×${Math.exp(radar.fit.loo_flat).toFixed(2)}\n` +
+    `token radar: fit log(mcap) = ${radar.fit.intercept} + ${radar.fit.slope}·log(TVL), R² ${radar.fit.r2}; held-out miss ×${Math.exp(radar.fit.loo_miss).toFixed(2)} vs flat ×${Math.exp(radar.fit.loo_flat).toFixed(2)}; walk-forward ×${Math.exp(radar.fit.wf_miss).toFixed(2)} vs flat ×${Math.exp(radar.fit.wf_flat).toFixed(2)}\n` +
     `token radar: odds Brier ${radar.odds.brier} vs base ${radar.odds.brier_base} (CV ${radar.odds.brier_cv}); ${radar.kpi.farm_count} FARM, ${radar.kpi.marginal_count} MARGINAL, ${radar.kpi.skip_count} SKIP\n` +
+    `token radar: parent discount ×${radar.parent_discount} from ${radar.parent_pairs} kin pair(s) (median ratio ${radar.parent_ratio}); integrity ${radar.integrity.checksum} over ${radar.integrity.rows} rows\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

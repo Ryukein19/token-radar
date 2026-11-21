@@ -51,9 +51,11 @@
   a token will launch, or when. A "kin of a token" badge means the name stem matches a
   protocol whose token already trades — a heuristic from the name alone.</p>
   <p><strong>What the verdicts are.</strong> FARM / MARGINAL / SKIP are costed claims at
-  the ticket and drop share you set: slice = implied × drop share × (ticket / TVL),
-  net = slice − fees − time at $25/h. FARM needs net &gt; $25 and net/hour &gt; $25.
-  Change the ticket or the drop share and every verdict recomputes.</p>
+  the deposit plan you set: deposit = 0.20% of TVL, capped at $50,000; slice = implied ×
+  7% × (deposit / TVL); net = slice − fees − time at $25/h, over 12 weeks. FARM beats the
+  T-bill return on the deposit (4.5%/yr) AND pays more than $25/hour; MARGINAL covers
+  fees and time. Change the deposit, the drop share or the horizon and every verdict
+  recomputes.</p>
   <p class="src" id="src"></p>
 </footer>
 <script src="../data.js"></script>
