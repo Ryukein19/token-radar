@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — the pre-token protocol board</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>TOKEN RADAR</h1>
+    <p class="sub">The pre-token protocol board — which protocol records no token yet, what it could be worth, and how to farm it. Fitted on the snapshot's own figures, never on a hand-kept list of names.</p>
+  </div>
+  <div class="meta" id="meta"></div>
+</header>
+
+<section class="kpis" id="kpis"></section>
+
+<section class="grid2">
+  <div class="card" id="formula"></div>
+  <div class="card" id="ledger"></div>
+</section>
+
+<section class="card controls" id="controls"></section>
+
+<section class="card" id="detail" hidden></section>
+
+<section class="card" id="boardsec">
+  <div class="boardhead"><h2>Ranked board</h2><span id="count"></span></div>
+  <div class="tablewrap"><table id="board"></table></div>
+  <p class="check" id="selfcheck"></p>
+</section>
+
+<section class="card" id="evidence"></section>
+
+<section class="grid2">
+  <div class="card" id="scatter"></div>
+  <div class="card" id="howto"></div>
+</section>
+
+<section class="card" id="live"></section>
+
+<footer>
+  <p><strong>What "records no token" means.</strong> A protocol records no token when
+  DefiLlama records neither a CoinGecko id nor a symbol for it. That is the record, not
+  proof it has none — and a wrapped, staked or bridged product of a token that trades is
+  not a token that does not exist yet, so the board never ranks one.</p>
+  <p><strong>What the odds are.</strong> The odds are the peers' record, not a forecast:
+  among protocols like this one, how often does one record a token? The page never says
+  a token will launch, or when. A "kin of a token" badge means the name stem matches a
+  protocol whose token already trades — a heuristic from the name alone.</p>
+  <p><strong>What the verdicts are.</strong> FARM / MARGINAL / SKIP are costed claims at
+  the ticket and drop share you set: slice = implied × drop share × (ticket / TVL),
+  net = slice − fees − time at $25/h. FARM needs net &gt; $25 and net/hour &gt; $25.
+  Change the ticket or the drop share and every verdict recomputes.</p>
+  <p class="src" id="src"></p>
+</footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
